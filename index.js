@@ -108,7 +108,7 @@ async function scanAccountRealFolders(acc) {
     rootItems.forEach(item => {
       if (item.name && !item.name.startsWith('.')) {
         if (item.id === null || !item.name.includes('.')) {
-          detectedFolders.add(item.name);
+          detectedFolders.add(item.name.trim());
         }
       }
     });
@@ -119,20 +119,25 @@ async function scanAccountRealFolders(acc) {
   }
 }
 
-// 1. DYNAMIC PLAYLISTS API
+// 1. UNIQUE MERGED PLAYLISTS API FOR FRONTEND
 app.get('/playlists', async (req, res) => {
   try {
     const accounts = getSupabaseClients();
-    const allFoundFolders = new Set();
+    const seenMap = new Map(); // key: normalized name, value: original casing
 
     for (const acc of accounts) {
       const folders = await scanAccountRealFolders(acc);
       folders.forEach(f => {
-        if (f && f.trim() !== '') allFoundFolders.add(f.trim());
+        if (f && f.trim() !== '') {
+          const norm = f.trim().toLowerCase();
+          if (!seenMap.has(norm)) {
+            seenMap.set(norm, f.trim());
+          }
+        }
       });
     }
 
-    const list = Array.from(allFoundFolders);
+    let list = Array.from(seenMap.values());
     if (list.length === 0) list.push("Hindi Song's");
     res.json(list);
   } catch (err) {
@@ -140,7 +145,7 @@ app.get('/playlists', async (req, res) => {
   }
 });
 
-// 2. PUBLIC API: FETCH ALL TRACKS
+// 2. PUBLIC API: FETCH ALL TRACKS (Across all accounts and merge)
 app.get('/songs', async (req, res) => {
   try {
     const accounts = getSupabaseClients();
@@ -199,7 +204,7 @@ app.get('/songs', async (req, res) => {
                 const cleanTitle = file.name.replace(/\.[^/.]+$/, '').replace(/_/g, ' ').trim();
 
                 return {
-                  id: `${folder.toLowerCase().replace(/[^a-z0-9]/g, '')}_${acc.id}_${idx + 1}`,
+                  id: `${folder.toLowerCase().replace(/[^a-z0-9]/g, '')}_${acc.id}_${idx + 1}_${Math.random().toString(36).substring(2, 6)}`,
                   fileName: file.name,
                   title: cleanTitle,
                   url: urlData.publicUrl,
@@ -223,7 +228,7 @@ app.get('/songs', async (req, res) => {
   }
 });
 
-// 3. DUAL ROLE LOGIN
+// 3. ADMIN AUTH
 app.post('/admin/login', (req, res) => {
   const { password } = req.body;
   const key = (password || '').trim();
@@ -292,7 +297,7 @@ app.get('/admin/accounts-overview', verifyAnyAdmin, async (req, res) => {
   }
 });
 
-// CREATE PLAYLIST (Super Admin Only)
+// CREATE PLAYLIST (Super Admin Only: Targeted explicitly to selected account)
 app.post('/admin/create-playlist', verifySuperAdminOnly, async (req, res) => {
   try {
     const { accountId, playlistName } = req.body;
@@ -312,7 +317,7 @@ app.post('/admin/create-playlist', verifySuperAdminOnly, async (req, res) => {
       .upload(placeholderPath, emptyBuf, { upsert: true });
 
     if (!error) {
-      res.json({ success: true, message: `Playlist "${cleanFolder}" created successfully!` });
+      res.json({ success: true, message: `Playlist "${cleanFolder}" created in ${acc.name}!` });
     } else {
       res.status(500).json({ success: false, error: error.message });
     }
@@ -321,7 +326,7 @@ app.post('/admin/create-playlist', verifySuperAdminOnly, async (req, res) => {
   }
 });
 
-// RENAME PLAYLIST (Super Admin Only)
+// RENAME PLAYLIST
 app.post('/admin/rename-playlist', verifySuperAdminOnly, async (req, res) => {
   try {
     const { oldPlaylistName, newPlaylistName, accountId } = req.body;
@@ -331,8 +336,9 @@ app.post('/admin/rename-playlist', verifySuperAdminOnly, async (req, res) => {
 
     const cleanNewName = newPlaylistName.trim().replace(/[/\\?%*:|"<>]/g, '');
     const accounts = getSupabaseClients();
+    
+    // If accountId is provided, rename only in that account; otherwise everywhere
     let targetAccs = accounts;
-
     if (accountId) {
       targetAccs = accounts.filter(a => a.id === parseInt(accountId, 10));
     }
@@ -357,7 +363,7 @@ app.post('/admin/rename-playlist', verifySuperAdminOnly, async (req, res) => {
   }
 });
 
-// DELETE PLAYLIST (Super Admin Only)
+// DELETE PLAYLIST
 app.post('/admin/delete-playlist', verifySuperAdminOnly, async (req, res) => {
   try {
     const { playlistName, accountId } = req.body;
@@ -367,7 +373,6 @@ app.post('/admin/delete-playlist', verifySuperAdminOnly, async (req, res) => {
 
     const accounts = getSupabaseClients();
     let targetAccs = accounts;
-
     if (accountId) {
       targetAccs = accounts.filter(a => a.id === parseInt(accountId, 10));
     }
@@ -387,7 +392,7 @@ app.post('/admin/delete-playlist', verifySuperAdminOnly, async (req, res) => {
   }
 });
 
-// BATCH UPLOAD SONGS (Super & Mini Admin)
+// BATCH UPLOAD: Strict Account Isolation for Super Admin + Auto-Routing for Mini Admin
 app.post('/admin/upload', verifyAnyAdmin, upload.array('songFiles', 50), async (req, res) => {
   try {
     const { accountId, playlist } = req.body;
@@ -400,22 +405,36 @@ app.post('/admin/upload', verifyAnyAdmin, upload.array('songFiles', 50), async (
     const accounts = getSupabaseClients();
     let targetAcc = null;
 
+    // Rule 1: Super Admin explicitly chooses the account
     if (accountId) {
       targetAcc = accounts.find(a => a.id === parseInt(accountId, 10));
     }
 
+    // Rule 2: Mini Admin uploads without accountId -> Find account with that playlist and space
     if (!targetAcc) {
       for (const a of accounts) {
         const folders = await scanAccountRealFolders(a);
-        if (folders.includes(playlist)) {
-          targetAcc = a;
-          break;
+        const folderExists = folders.some(f => f.toLowerCase() === playlist.toLowerCase());
+
+        if (folderExists) {
+          // Check storage limit
+          let totalBytes = 0;
+          for (const f of folders) {
+            const { data: fList } = await a.client.storage.from(a.bucket).list(f, { limit: 1000 });
+            (fList || []).forEach(item => { totalBytes += item.metadata?.size || 0; });
+          }
+          if (totalBytes < 1024 * 1024 * 1024) {
+            targetAcc = a;
+            break;
+          }
         }
       }
     }
 
+    // Fallback to first account if still none selected
     if (!targetAcc) targetAcc = accounts[0];
 
+    // Verify 1GB threshold on target account
     let totalBytes = 0;
     const folders = await scanAccountRealFolders(targetAcc);
     for (const f of folders) {
@@ -430,7 +449,7 @@ app.post('/admin/upload', verifyAnyAdmin, upload.array('songFiles', 50), async (
     if (totalBytes + incomingBatchBytes > ONE_GB_BYTES) {
       return res.status(400).json({
         success: false,
-        error: `STORAGE LIMIT EXCEEDED! ${targetAcc.name} is full.`
+        error: `STORAGE LIMIT REACHED! ${targetAcc.name} is full (1GB limit).`
       });
     }
 
@@ -449,14 +468,14 @@ app.post('/admin/upload', verifyAnyAdmin, upload.array('songFiles', 50), async (
 
     res.json({
       success: true,
-      message: `Uploaded ${uploadedCount} of ${files.length} songs to [${playlist}]!`
+      message: `Uploaded ${uploadedCount} songs to [${playlist}] in ${targetAcc.name}!`
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// DELETE SONG (Super & Mini Admin)
+// DELETE SONG
 app.post('/admin/delete', verifyAnyAdmin, async (req, res) => {
   try {
     const { accountId, playlist, fileName } = req.body;
@@ -471,7 +490,7 @@ app.post('/admin/delete', verifyAnyAdmin, async (req, res) => {
     if (targetAcc) {
       const { data, error } = await targetAcc.client.storage.from(targetAcc.bucket).remove([targetFilePath]);
       if (!error && data && data.length > 0) {
-        return res.json({ success: true, message: `"${fileName}" deleted successfully.` });
+        return res.json({ success: true, message: `"${fileName}" deleted from ${targetAcc.name}.` });
       }
     }
 
@@ -491,7 +510,7 @@ app.post('/admin/delete', verifyAnyAdmin, async (req, res) => {
   }
 });
 
-// RENAME SONG (Super & Mini Admin)
+// RENAME SONG
 app.post('/admin/rename', verifyAnyAdmin, async (req, res) => {
   try {
     const { accountId, playlist, oldFileName, newTitle } = req.body;
@@ -509,7 +528,7 @@ app.post('/admin/rename', verifyAnyAdmin, async (req, res) => {
     if (!targetAcc) {
       for (const a of accounts) {
         const folders = await scanAccountRealFolders(a);
-        if (folders.includes(playlist)) {
+        if (folders.some(f => f.toLowerCase() === playlist.toLowerCase())) {
           targetAcc = a;
           break;
         }
