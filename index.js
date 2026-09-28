@@ -203,6 +203,25 @@ app.post('/admin/delete', (req, res) => {
     }
 });
 
+app.post('/admin/rename', (req, res) => {
+    try {
+        const { accountId = 1, playlist, oldFileName, newTitle } = req.body;
+        const oldPath = path.join(getAccountDir(accountId), playlist, oldFileName);
+        const ext = path.extname(oldFileName) || '.mp3';
+        const newFileName = newTitle.trim().replace(/[^a-zA-Z0-9.\-_]/g, '_') + ext;
+        const newPath = path.join(getAccountDir(accountId), playlist, newFileName);
+
+        if (fs.existsSync(oldPath)) {
+            fs.renameSync(oldPath, newPath);
+            res.json({ success: true, message: 'Renamed successfully' });
+        } else {
+            res.status(404).json({ success: false, error: 'File not found' });
+        }
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 app.listen(PORT, () => {
     console.log(`Vision Music Backend running on port ${PORT}`);
 });
