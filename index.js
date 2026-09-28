@@ -7,7 +7,7 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// Disable caching for instant real-time sync across devices
+// Real-time synchronization
 app.use((req, res, next) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
@@ -21,11 +21,15 @@ const MINI_ADMIN_KEY = process.env.MINI_ADMIN_KEY || 'Vision@MiniAdmin2026#Acces
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 } // 100MB per file
+  limits: { fileSize: 100 * 1024 * 1024 }
 });
 
+// UNLIMITED DYNAMIC SUPABASE ACCOUNTS DISCOVERY ENGINE
 function getSupabaseClients() {
   const clients = [];
+  const registeredUrls = new Set();
+
+  // Primary Account (Account 1)
   if (process.env.SUPABASE_URL && process.env.SUPABASE_KEY) {
     clients.push({
       id: 1,
@@ -33,22 +37,39 @@ function getSupabaseClients() {
       client: createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY),
       bucket: process.env.SUPABASE_BUCKET || 'songs'
     });
+    registeredUrls.add(process.env.SUPABASE_URL);
   }
 
-  for (let i = 1; i <= 20; i++) {
-    const url = process.env[`SUPABASE_URL_${i}`];
-    const key = process.env[`SUPABASE_KEY_${i}`];
-    const bucket = process.env[`SUPABASE_BUCKET_${i}`] || process.env.SUPABASE_BUCKET || 'songs';
+  // Scan ALL process.env keys dynamically for unlimited accounts (SUPABASE_URL_2, 3, ... 50, 100+)
+  const envKeys = Object.keys(process.env);
+  const detectedIndices = new Set();
 
-    if (url && key && (!process.env.SUPABASE_URL || url !== process.env.SUPABASE_URL)) {
+  envKeys.forEach(k => {
+    const match = k.match(/^SUPABASE_URL_(\d+)$/i);
+    if (match) {
+      detectedIndices.add(parseInt(match[1], 10));
+    }
+  });
+
+  // Sort numerical order (2, 3, 4, 5...)
+  const sortedIndices = Array.from(detectedIndices).sort((a, b) => a - b);
+
+  sortedIndices.forEach(idx => {
+    const url = process.env[`SUPABASE_URL_${idx}`];
+    const key = process.env[`SUPABASE_KEY_${idx}`];
+    const bucket = process.env[`SUPABASE_BUCKET_${idx}`] || process.env.SUPABASE_BUCKET || 'songs';
+
+    if (url && key && !registeredUrls.has(url)) {
       clients.push({
-        id: clients.length + 1,
-        name: `Account ${clients.length + 1}`,
+        id: idx,
+        name: `Account ${idx}`,
         client: createClient(url, key),
         bucket: bucket
       });
+      registeredUrls.add(url);
     }
-  }
+  });
+
   return clients;
 }
 
@@ -83,14 +104,15 @@ app.get('/', (req, res) => {
   res.send('Vision Music Engine Live & Synced.');
 });
 
-// KEEP-ALIVE BOT HEALTHCHECK ENDPOINT
+// KEEP-ALIVE BOT HEALTHCHECK ENDPOINT (Wakes all attached Supabase accounts)
 app.get('/ping', async (req, res) => {
   try {
     const accounts = getSupabaseClients();
-    if (accounts.length > 0) {
-      await accounts[0].client.storage.from(accounts[0].bucket).list('', { limit: 1 });
-    }
-    res.status(200).json({ status: 'alive', time: new Date().toISOString() });
+    const pingPromises = accounts.map(acc => 
+      acc.client.storage.from(acc.bucket).list('', { limit: 1 }).catch(() => null)
+    );
+    await Promise.all(pingPromises);
+    res.status(200).json({ status: 'alive', totalAccountsActive: accounts.length, time: new Date().toISOString() });
   } catch (err) {
     res.status(200).json({ status: 'alive_with_notice', error: err.message });
   }
@@ -123,7 +145,7 @@ async function scanAccountRealFolders(acc) {
 app.get('/playlists', async (req, res) => {
   try {
     const accounts = getSupabaseClients();
-    const seenMap = new Map(); // key: normalized name, value: original casing
+    const seenMap = new Map();
 
     for (const acc of accounts) {
       const folders = await scanAccountRealFolders(acc);
@@ -145,7 +167,7 @@ app.get('/playlists', async (req, res) => {
   }
 });
 
-// 2. PUBLIC API: FETCH ALL TRACKS (Across all accounts and merge)
+// 2. PUBLIC API: FETCH ALL TRACKS (Across unlimited accounts)
 app.get('/songs', async (req, res) => {
   try {
     const accounts = getSupabaseClients();
@@ -242,7 +264,7 @@ app.post('/admin/login', (req, res) => {
   return res.status(401).json({ success: false, error: 'Incorrect Access Key' });
 });
 
-// Accounts overview
+// Accounts overview (Dynamic Accounts Monitor)
 app.get('/admin/accounts-overview', verifyAnyAdmin, async (req, res) => {
   try {
     const accounts = getSupabaseClients();
@@ -297,7 +319,7 @@ app.get('/admin/accounts-overview', verifyAnyAdmin, async (req, res) => {
   }
 });
 
-// CREATE PLAYLIST (Super Admin Only: Targeted explicitly to selected account)
+// CREATE PLAYLIST (Super Admin Only)
 app.post('/admin/create-playlist', verifySuperAdminOnly, async (req, res) => {
   try {
     const { accountId, playlistName } = req.body;
@@ -337,7 +359,6 @@ app.post('/admin/rename-playlist', verifySuperAdminOnly, async (req, res) => {
     const cleanNewName = newPlaylistName.trim().replace(/[/\\?%*:|"<>]/g, '');
     const accounts = getSupabaseClients();
     
-    // If accountId is provided, rename only in that account; otherwise everywhere
     let targetAccs = accounts;
     if (accountId) {
       targetAccs = accounts.filter(a => a.id === parseInt(accountId, 10));
@@ -405,19 +426,16 @@ app.post('/admin/upload', verifyAnyAdmin, upload.array('songFiles', 50), async (
     const accounts = getSupabaseClients();
     let targetAcc = null;
 
-    // Rule 1: Super Admin explicitly chooses the account
     if (accountId) {
       targetAcc = accounts.find(a => a.id === parseInt(accountId, 10));
     }
 
-    // Rule 2: Mini Admin uploads without accountId -> Find account with that playlist and space
     if (!targetAcc) {
       for (const a of accounts) {
         const folders = await scanAccountRealFolders(a);
         const folderExists = folders.some(f => f.toLowerCase() === playlist.toLowerCase());
 
         if (folderExists) {
-          // Check storage limit
           let totalBytes = 0;
           for (const f of folders) {
             const { data: fList } = await a.client.storage.from(a.bucket).list(f, { limit: 1000 });
@@ -431,10 +449,8 @@ app.post('/admin/upload', verifyAnyAdmin, upload.array('songFiles', 50), async (
       }
     }
 
-    // Fallback to first account if still none selected
     if (!targetAcc) targetAcc = accounts[0];
 
-    // Verify 1GB threshold on target account
     let totalBytes = 0;
     const folders = await scanAccountRealFolders(targetAcc);
     for (const f of folders) {
