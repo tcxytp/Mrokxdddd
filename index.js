@@ -13,7 +13,6 @@ app.use(express.json());
 const STORAGE_DIR = path.join(__dirname, 'storage');
 if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR);
 
-// Multi-account setup (Support for accounts 1, 2, etc.)
 function getAccountDir(accountId = 1) {
     const accDir = path.join(STORAGE_DIR, `account_${accountId}`);
     if (!fs.existsSync(accDir)) fs.mkdirSync(accDir, { recursive: true });
@@ -22,7 +21,6 @@ function getAccountDir(accountId = 1) {
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Cold-start wakeup ping endpoint
 app.get('/playlists', (req, res) => {
     try {
         const accounts = [1, 2, 3];
@@ -30,10 +28,12 @@ app.get('/playlists', (req, res) => {
         
         accounts.forEach(accId => {
             const accDir = getAccountDir(accId);
-            const folders = fs.readdirSync(accDir, { withFileTypes: true })
-                .filter(dirent => dirent.isDirectory())
-                .map(dirent => dirent.name);
-            folders.forEach(f => allFolders.add(f));
+            if (fs.existsSync(accDir)) {
+                const folders = fs.readdirSync(accDir, { withFileTypes: true })
+                    .filter(dirent => dirent.isDirectory())
+                    .map(dirent => dirent.name);
+                folders.forEach(f => allFolders.add(f));
+            }
         });
 
         res.json(Array.from(allFolders));
@@ -49,6 +49,8 @@ app.get('/songs', (req, res) => {
 
         accounts.forEach(accId => {
             const accDir = getAccountDir(accId);
+            if (!fs.existsSync(accDir)) return;
+
             const folders = fs.readdirSync(accDir, { withFileTypes: true })
                 .filter(dirent => dirent.isDirectory())
                 .map(dirent => dirent.name);
