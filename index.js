@@ -11,40 +11,48 @@ app.use(express.json());
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Initialize single Supabase client using standard variables
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
-const bucketName = process.env.SUPABASE_BUCKET_NAME || 'music-bucket';
+const bucketName = process.env.SUPABASE_BUCKET_NAME || 'songs';
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// Get Playlists across all accounts
+// Get Playlists & Folders dynamically from Supabase bucket root
 app.get('/playlists', async (req, res) => {
     try {
         let uniqueFoldersMap = new Map();
         uniqueFoldersMap.set("likedsongs", "Liked Songs");
         uniqueFoldersMap.set("hindisongs", "Hindi Song's");
 
-        const accounts = [1, 2, 3];
+        // List root contents of the bucket
+        const { data: rootItems, error } = await supabase.storage.from(bucketName).list('', {
+            limit: 100
+        });
 
-        for (const accId of accounts) {
-            try {
-                const { data, error } = await supabase.storage.from(bucketName).list(`account_${accId}`, {
-                    limit: 100
-                });
-
-                if (!error && data) {
-                    data.forEach(item => {
-                        if (item.id === null || !item.name.includes('.')) {
-                            const rawName = item.name.trim();
-                            const norm = rawName.toLowerCase().replace(/[^a-z0-9]/g, '');
-                            if (norm && !uniqueFoldersMap.has(norm)) {
-                                uniqueFoldersMap.set(norm, rawName);
-                            }
-                        }
+        if (!error && rootItems) {
+            for (const item of rootItems) {
+                // Check if it's an account folder like account_1, account_2, etc.
+                if (item.id === null || !item.name.includes('.')) {
+                    const accFolderName = item.name; // e.g. account_1 or a custom folder
+                    
+                    // List subfolders inside this account folder
+                    const { data: subItems } = await supabase.storage.from(bucketName).list(accFolderName, {
+                        limit: 100
                     });
+
+                    if (subItems) {
+                        subItems.forEach(sub => {
+                            if (sub.id === null || !sub.name.includes('.')) {
+                                const rawName = sub.name.trim();
+                                const norm = rawName.toLowerCase().replace(/[^a-z0-9]/g, '');
+                                if (norm && !uniqueFoldersMap.has(norm)) {
+                                    uniqueFoldersMap.set(norm, rawName);
+                                }
+                            }
+                        });
+                    }
                 }
-            } catch (e) {}
+            }
         }
 
         res.json(Array.from(uniqueFoldersMap.values()));
@@ -53,56 +61,65 @@ app.get('/playlists', async (req, res) => {
     }
 });
 
-// Get Songs across all accounts from Supabase Storage
+// Get Songs dynamically from all account folders
 app.get('/songs', async (req, res) => {
     try {
         let allSongs = [];
         let seenSongUrls = new Set();
-        const accounts = [1, 2, 3];
 
-        for (const accId of accounts) {
-            try {
-                const prefix = `account_${accId}`;
-                const { data: folders, error: foldErr } = await supabase.storage.from(bucketName).list(prefix, {
-                    limit: 100
-                });
+        const { data: rootItems, error } = await supabase.storage.from(bucketName).list('', {
+            limit: 100
+        });
 
-                if (foldErr || !folders) continue;
+        if (!error && rootItems) {
+            for (const item of rootItems) {
+                if (item.id === null || !item.name.includes('.')) {
+                    const accFolderName = item.name;
+                    let accId = 1;
+                    const matchId = accFolderName.match(/\d+/);
+                    if (matchId) accId = parseInt(matchId[0], 10);
 
-                for (const folderItem of folders) {
-                    if (folderItem.id === null || !folderItem.name.includes('.')) {
-                        const folderName = folderItem.name;
-                        const subfolderPath = `${prefix}/${folderName}`;
+                    const { data: subItems } = await supabase.storage.from(bucketName).list(accFolderName, {
+                        limit: 100
+                    });
 
-                        const { data: files, error: fileErr } = await supabase.storage.from(bucketName).list(subfolderPath, {
-                            limit: 500
-                        });
+                    if (subItems) {
+                        for (const sub of subItems) {
+                            if (sub.id === null || !sub.name.includes('.')) {
+                                const folderName = sub.name;
+                                const subfolderPath = `${accFolderName}/${folderName}`;
 
-                        if (fileErr || !files) continue;
+                                const { data: files } = await supabase.storage.from(bucketName).list(subfolderPath, {
+                                    limit: 500
+                                });
 
-                        for (const file of files) {
-                            if (file.name.endsWith('.mp3') || file.name.endsWith('.wav')) {
-                                const filePath = `${subfolderPath}/${file.name}`;
-                                const { data: publicUrlData } = supabase.storage.from(bucketName).getPublicUrl(filePath);
-                                const trackUrl = publicUrlData.publicUrl;
+                                if (files) {
+                                    for (const file of files) {
+                                        if (file.name.endsWith('.mp3') || file.name.endsWith('.wav')) {
+                                            const filePath = `${subfolderPath}/${file.name}`;
+                                            const { data: publicUrlData } = supabase.storage.from(bucketName).getPublicUrl(filePath);
+                                            const trackUrl = publicUrlData.publicUrl;
 
-                                if (!seenSongUrls.has(trackUrl)) {
-                                    seenSongUrls.add(trackUrl);
-                                    allSongs.push({
-                                        id: `${accId}_${folderName}_${file.name}`,
-                                        accountId: accId,
-                                        playlist: folderName,
-                                        title: file.name.replace(/\.[^/.]+$/, ""),
-                                        fileName: file.name,
-                                        sizeBytes: file.metadata?.size || 0,
-                                        url: trackUrl
-                                    });
+                                            if (!seenSongUrls.has(trackUrl)) {
+                                                seenSongUrls.add(trackUrl);
+                                                allSongs.push({
+                                                    id: `${accId}_${folderName}_${file.name}`,
+                                                    accountId: accId,
+                                                    playlist: folderName,
+                                                    title: file.name.replace(/\.[^/.]+$/, ""),
+                                                    fileName: file.name,
+                                                    sizeBytes: file.metadata?.size || 0,
+                                                    url: trackUrl
+                                                });
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            } catch (e) {}
+            }
         }
 
         res.json(allSongs);
@@ -111,7 +128,7 @@ app.get('/songs', async (req, res) => {
     }
 });
 
-// Admin Login mapping with ADMIN_SECRET_KEY and MINI_ADMIN_KEY
+// Admin Login mapping
 app.post('/admin/login', (req, res) => {
     const { password } = req.body;
     const masterKey = process.env.ADMIN_SECRET_KEY || process.env.DKIN_SECRET_KE || 'vision99377';
