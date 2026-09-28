@@ -1,8 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
-const fs = require('fs');
-const path = require('path');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -10,72 +9,109 @@ const PORT = process.env.PORT || 10000;
 app.use(cors());
 app.use(express.json());
 
-const STORAGE_DIR = path.join(__dirname, 'storage');
-if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR);
-
-function getAccountDir(accountId = 1) {
-    const accDir = path.join(STORAGE_DIR, `account_${accountId}`);
-    if (!fs.existsSync(accDir)) fs.mkdirSync(accDir, { recursive: true });
-    return accDir;
-}
-
 const upload = multer({ storage: multer.memoryStorage() });
 
-app.get('/playlists', (req, res) => {
-    try {
-        const accounts = [1, 2, 3];
-        let allFolders = new Set(["Liked Songs", "Hindi Song's"]);
-        
-        accounts.forEach(accId => {
-            const accDir = getAccountDir(accId);
-            if (fs.existsSync(accDir)) {
-                const folders = fs.readdirSync(accDir, { withFileTypes: true })
-                    .filter(dirent => dirent.isDirectory())
-                    .map(dirent => dirent.name);
-                folders.forEach(f => allFolders.add(f));
-            }
-        });
+function getSupabaseClient(accountId = 1) {
+    let url = process.env[`SUPABASE_URL_${accountId}`] || process.env.SUPABASE_URL_1 || process.env.SUPABASE_URL;
+    let key = process.env[`SUPABASE_KEY_${accountId}`] || process.env.SUPABASE_KEY_1 || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+    
+    if (!url || !key) {
+        url = process.env.SUPABASE_URL_1 || process.env.SUPABASE_URL;
+        key = process.env.SUPABASE_KEY_1 || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+    }
+    return createClient(url, key);
+}
 
-        res.json(Array.from(allFolders));
+const getBucketName = () => process.env.SUPABASE_BUCKET_NAME || process.env.SUPABASE__BUCKET_NAME || 'music-bucket';
+
+// Unique Folders / Playlists API (No Duplicates)
+app.get('/playlists', async (req, res) => {
+    try {
+        let uniqueFoldersMap = new Map();
+        uniqueFoldersMap.set("likedsongs", "Liked Songs");
+        uniqueFoldersMap.set("hindisongs", "Hindi Song's");
+
+        const accounts = [1, 2, 3, 4, 5];
+
+        for (const accId of accounts) {
+            try {
+                const sClient = getSupabaseClient(accId);
+                const { data, error } = await sClient.storage.from(getBucketName()).list(`account_${accId}`, {
+                    limit: 100
+                });
+
+                if (!error && data) {
+                    data.forEach(item => {
+                        if (item.id === null || !item.name.includes('.')) {
+                            const rawName = item.name.trim();
+                            const norm = rawName.toLowerCase().replace(/[^a-z0-9]/g, '');
+                            if (norm && !uniqueFoldersMap.has(norm)) {
+                                uniqueFoldersMap.set(norm, rawName);
+                            }
+                        }
+                    });
+                }
+            } catch (e) {}
+        }
+
+        res.json(Array.from(uniqueFoldersMap.values()));
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-app.get('/songs', (req, res) => {
+// Unique Songs API
+app.get('/songs', async (req, res) => {
     try {
         let allSongs = [];
-        const accounts = [1, 2, 3];
+        let seenSongUrls = new Set();
+        const accounts = [1, 2, 3, 4, 5];
 
-        accounts.forEach(accId => {
-            const accDir = getAccountDir(accId);
-            if (!fs.existsSync(accDir)) return;
-
-            const folders = fs.readdirSync(accDir, { withFileTypes: true })
-                .filter(dirent => dirent.isDirectory())
-                .map(dirent => dirent.name);
-
-            folders.forEach(folder => {
-                const folderPath = path.join(accDir, folder);
-                const files = fs.readdirSync(folderPath);
-
-                files.forEach(file => {
-                    if (file.endsWith('.mp3') || file.endsWith('.wav')) {
-                        const filePath = path.join(folderPath, file);
-                        const stats = fs.statSync(filePath);
-                        allSongs.push({
-                            id: `${accId}_${folder}_${file}`,
-                            accountId: accId,
-                            playlist: folder,
-                            title: file.replace(/\.[^/.]+$/, ""),
-                            fileName: file,
-                            sizeBytes: stats.size,
-                            url: `https://${req.get('host')}/stream/${accId}/${encodeURIComponent(folder)}/${encodeURIComponent(file)}`
-                        });
-                    }
+        for (const accId of accounts) {
+            try {
+                const sClient = getSupabaseClient(accId);
+                const prefix = `account_${accId}`;
+                const { data: folders, error: foldErr } = await sClient.storage.from(getBucketName()).list(prefix, {
+                    limit: 100
                 });
-            });
-        });
+
+                if (foldErr || !folders) continue;
+
+                for (const folderItem of folders) {
+                    if (folderItem.id === null || !folderItem.name.includes('.')) {
+                        const folderName = folderItem.name;
+                        const subfolderPath = `${prefix}/${folderName}`;
+
+                        const { data: files, error: fileErr } = await sClient.storage.from(getBucketName()).list(subfolderPath, {
+                            limit: 500
+                        });
+
+                        if (fileErr || !files) continue;
+
+                        for (const file of files) {
+                            if (file.name.endsWith('.mp3') || file.name.endsWith('.wav')) {
+                                const filePath = `${subfolderPath}/${file.name}`;
+                                const { data: publicUrlData } = sClient.storage.from(getBucketName()).getPublicUrl(filePath);
+                                const trackUrl = publicUrlData.publicUrl;
+
+                                if (!seenSongUrls.has(trackUrl)) {
+                                    seenSongUrls.add(trackUrl);
+                                    allSongs.push({
+                                        id: `${accId}_${folderName}_${file.name}`,
+                                        accountId: accId,
+                                        playlist: folderName,
+                                        title: file.name.replace(/\.[^/.]+$/, ""),
+                                        fileName: file.name,
+                                        sizeBytes: file.metadata?.size || 0,
+                                        url: trackUrl
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e) {}
+        }
 
         res.json(allSongs);
     } catch (err) {
@@ -83,70 +119,67 @@ app.get('/songs', (req, res) => {
     }
 });
 
-app.get('/stream/:accId/:playlist/:filename', (req, res) => {
-    try {
-        const { accId, playlist, filename } = req.params;
-        const filePath = path.join(getAccountDir(accId), playlist, filename);
-        if (fs.existsSync(filePath)) {
-            res.sendFile(filePath);
-        } else {
-            res.status(404).send('Track not found');
-        }
-    } catch (err) {
-        res.status(500).send(err.message);
-    }
-});
-
 app.post('/admin/login', (req, res) => {
     const { password } = req.body;
-    if (password === 'vision99377' || password === 'admin123') {
+    const masterKey = process.env.ADMIN_SECRET_KEY || process.env.DKIN_SECRET_KE || 'vision99377';
+    const miniKey = process.env.MINI_ADMIN_KEY || 'mini123';
+
+    if (password === masterKey || password === 'admin123') {
         res.json({ success: true, role: 'superadmin' });
-    } else if (password === 'mini123') {
+    } else if (password === miniKey) {
         res.json({ success: true, role: 'miniadmin' });
     } else {
         res.status(401).json({ success: false, error: 'Invalid Access Key' });
     }
 });
 
-app.get('/admin/accounts-overview', (req, res) => {
+app.get('/admin/accounts-overview', async (req, res) => {
     try {
-        const accounts = [1, 2, 3].map(id => {
-            const accDir = getAccountDir(id);
+        const accounts = [];
+        const accIds = [1, 2, 3];
+
+        for (const id of accIds) {
+            const sClient = getSupabaseClient(id);
+            const prefix = `account_${id}`;
             let totalBytes = 0;
             let totalSongs = 0;
-            let folders = [];
+            let folderSet = new Set();
 
-            if (fs.existsSync(accDir)) {
-                folders = fs.readdirSync(accDir, { withFileTypes: true })
-                    .filter(d => d.isDirectory())
-                    .map(d => d.name);
-
-                folders.forEach(folder => {
-                    const fPath = path.join(accDir, folder);
-                    const files = fs.readdirSync(fPath);
-                    files.forEach(file => {
-                        if (file.endsWith('.mp3') || file.endsWith('.wav')) {
-                            totalSongs++;
-                            totalBytes += fs.statSync(path.join(fPath, file)).size;
+            try {
+                const { data: foldData } = await sClient.storage.from(getBucketName()).list(prefix, { limit: 100 });
+                if (foldData) {
+                    for (const f of foldData) {
+                        if (f.id === null || !f.name.includes('.')) {
+                            folderSet.add(f.name);
+                            const subPath = `${prefix}/${f.name}`;
+                            const { data: fileData } = await sClient.storage.from(getBucketName()).list(subPath, { limit: 500 });
+                            if (fileData) {
+                                fileData.forEach(file => {
+                                    if (file.name.endsWith('.mp3') || file.name.endsWith('.wav')) {
+                                        totalSongs++;
+                                        totalBytes += file.metadata?.size || 0;
+                                    }
+                                });
+                            }
                         }
-                    });
-                });
-            }
+                    }
+                }
+            } catch (e) {}
 
             const usedMB = (totalBytes / (1024 * 1024)).toFixed(2);
             const limitMB = 950;
             const percentUsed = ((usedMB / limitMB) * 100).toFixed(1);
 
-            return {
+            accounts.push({
                 id,
                 name: `Account ${id}`,
                 usedMB: parseFloat(usedMB),
                 percentUsed: parseFloat(percent),
                 isFull: usedMB >= limitMB,
                 totalSongs,
-                folders
-            };
-        });
+                folders: Array.from(folderSet)
+            });
+        }
 
         res.json({ success: true, accounts });
     } catch (err) {
@@ -154,19 +187,22 @@ app.get('/admin/accounts-overview', (req, res) => {
     }
 });
 
-app.post('/admin/create-playlist', (req, res) => {
+app.post('/admin/create-playlist', async (req, res) => {
     try {
         const { accountId = 1, playlistName } = req.body;
         if (!playlistName) return res.status(400).json({ success: false, error: 'Playlist name required' });
-        const folderPath = path.join(getAccountDir(accountId), playlistName.trim());
-        if (!fs.existsSync(folderPath)) fs.mkdirSync(folderPath, { recursive: true });
+        
+        const sClient = getSupabaseClient(accountId);
+        const placeholderPath = `account_${accountId}/${playlistName.trim()}/.keep`;
+        await sClient.storage.from(getBucketName()).upload(placeholderPath, Buffer.from('placeholder'), { upsert: true });
+
         res.json({ success: true, message: 'Playlist created successfully!' });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
 });
 
-app.post('/admin/upload', upload.single('songFiles'), (req, res) => {
+app.post('/admin/upload', upload.single('songFiles'), async (req, res) => {
     try {
         const { accountId = 1, playlist } = req.body;
         const file = req.file;
@@ -175,48 +211,35 @@ app.post('/admin/upload', upload.single('songFiles'), (req, res) => {
             return res.status(400).json({ success: false, error: 'File or playlist missing' });
         }
 
-        const folderPath = path.join(getAccountDir(accountId), playlist.trim());
-        if (!fs.existsSync(folderPath)) fs.mkdirSync(folderPath, { recursive: true });
-
+        const sClient = getSupabaseClient(accountId);
         const safeName = file.originalname.replace(/[^a-zA-Z0-9.\-_]/g, '_');
-        const destPath = path.join(folderPath, safeName);
+        const targetPath = `account_${accountId}/${playlist.trim()}/${safeName}`;
 
-        fs.writeFileSync(destPath, file.buffer);
-        res.json({ success: true, message: 'Uploaded successfully!' });
+        const { error } = await sClient.storage
+            .from(getBucketName())
+            .upload(targetPath, file.buffer, {
+                contentType: file.mimetype || 'audio/mpeg',
+                upsert: true
+            });
+
+        if (error) throw error;
+
+        res.json({ success: true, message: 'Uploaded successfully to Supabase!' });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
 });
 
-app.post('/admin/delete', (req, res) => {
+app.post('/admin/delete', async (req, res) => {
     try {
         const { accountId = 1, playlist, fileName } = req.body;
-        const filePath = path.join(getAccountDir(accountId), playlist, fileName);
-        if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-            res.json({ success: true, message: 'Deleted successfully' });
-        } else {
-            res.status(404).json({ success: false, error: 'File not found' });
-        }
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
+        const sClient = getSupabaseClient(accountId);
+        const filePath = `account_${accountId}/${playlist}/${fileName}`;
 
-app.post('/admin/rename', (req, res) => {
-    try {
-        const { accountId = 1, playlist, oldFileName, newTitle } = req.body;
-        const oldPath = path.join(getAccountDir(accountId), playlist, oldFileName);
-        const ext = path.extname(oldFileName) || '.mp3';
-        const newFileName = newTitle.trim().replace(/[^a-zA-Z0-9.\-_]/g, '_') + ext;
-        const newPath = path.join(getAccountDir(accountId), playlist, newFileName);
+        const { error } = await sClient.storage.from(getBucketName()).remove([filePath]);
+        if (error) throw error;
 
-        if (fs.existsSync(oldPath)) {
-            fs.renameSync(oldPath, newPath);
-            res.json({ success: true, message: 'Renamed successfully' });
-        } else {
-            res.status(404).json({ success: false, error: 'File not found' });
-        }
+        res.json({ success: true, message: 'Deleted successfully' });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
