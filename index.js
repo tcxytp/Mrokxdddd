@@ -11,32 +11,25 @@ app.use(express.json());
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-function getSupabaseClient(accountId = 1) {
-    let url = process.env[`SUPABASE_URL_${accountId}`] || process.env.SUPABASE_URL_1 || process.env.SUPABASE_URL;
-    let key = process.env[`SUPABASE_KEY_${accountId}`] || process.env.SUPABASE_KEY_1 || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
-    
-    if (!url || !key) {
-        url = process.env.SUPABASE_URL_1 || process.env.SUPABASE_URL;
-        key = process.env.SUPABASE_KEY_1 || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
-    }
-    return createClient(url, key);
-}
+// Initialize single Supabase client using standard variables
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+const bucketName = process.env.SUPABASE_BUCKET_NAME || 'music-bucket';
 
-const getBucketName = () => process.env.SUPABASE_BUCKET_NAME || process.env.SUPABASE__BUCKET_NAME || 'music-bucket';
+const supabase = createClient(supabaseUrl, supabaseKey);
 
-// Unique Folders / Playlists API (No Duplicates)
+// Get Playlists across all accounts
 app.get('/playlists', async (req, res) => {
     try {
         let uniqueFoldersMap = new Map();
         uniqueFoldersMap.set("likedsongs", "Liked Songs");
         uniqueFoldersMap.set("hindisongs", "Hindi Song's");
 
-        const accounts = [1, 2, 3, 4, 5];
+        const accounts = [1, 2, 3];
 
         for (const accId of accounts) {
             try {
-                const sClient = getSupabaseClient(accId);
-                const { data, error } = await sClient.storage.from(getBucketName()).list(`account_${accId}`, {
+                const { data, error } = await supabase.storage.from(bucketName).list(`account_${accId}`, {
                     limit: 100
                 });
 
@@ -60,18 +53,17 @@ app.get('/playlists', async (req, res) => {
     }
 });
 
-// Unique Songs API
+// Get Songs across all accounts from Supabase Storage
 app.get('/songs', async (req, res) => {
     try {
         let allSongs = [];
         let seenSongUrls = new Set();
-        const accounts = [1, 2, 3, 4, 5];
+        const accounts = [1, 2, 3];
 
         for (const accId of accounts) {
             try {
-                const sClient = getSupabaseClient(accId);
                 const prefix = `account_${accId}`;
-                const { data: folders, error: foldErr } = await sClient.storage.from(getBucketName()).list(prefix, {
+                const { data: folders, error: foldErr } = await supabase.storage.from(bucketName).list(prefix, {
                     limit: 100
                 });
 
@@ -82,7 +74,7 @@ app.get('/songs', async (req, res) => {
                         const folderName = folderItem.name;
                         const subfolderPath = `${prefix}/${folderName}`;
 
-                        const { data: files, error: fileErr } = await sClient.storage.from(getBucketName()).list(subfolderPath, {
+                        const { data: files, error: fileErr } = await supabase.storage.from(bucketName).list(subfolderPath, {
                             limit: 500
                         });
 
@@ -91,7 +83,7 @@ app.get('/songs', async (req, res) => {
                         for (const file of files) {
                             if (file.name.endsWith('.mp3') || file.name.endsWith('.wav')) {
                                 const filePath = `${subfolderPath}/${file.name}`;
-                                const { data: publicUrlData } = sClient.storage.from(getBucketName()).getPublicUrl(filePath);
+                                const { data: publicUrlData } = supabase.storage.from(bucketName).getPublicUrl(filePath);
                                 const trackUrl = publicUrlData.publicUrl;
 
                                 if (!seenSongUrls.has(trackUrl)) {
@@ -119,6 +111,7 @@ app.get('/songs', async (req, res) => {
     }
 });
 
+// Admin Login mapping with ADMIN_SECRET_KEY and MINI_ADMIN_KEY
 app.post('/admin/login', (req, res) => {
     const { password } = req.body;
     const masterKey = process.env.ADMIN_SECRET_KEY || process.env.DKIN_SECRET_KE || 'vision99377';
@@ -139,20 +132,19 @@ app.get('/admin/accounts-overview', async (req, res) => {
         const accIds = [1, 2, 3];
 
         for (const id of accIds) {
-            const sClient = getSupabaseClient(id);
             const prefix = `account_${id}`;
             let totalBytes = 0;
             let totalSongs = 0;
             let folderSet = new Set();
 
             try {
-                const { data: foldData } = await sClient.storage.from(getBucketName()).list(prefix, { limit: 100 });
+                const { data: foldData } = await supabase.storage.from(bucketName).list(prefix, { limit: 100 });
                 if (foldData) {
                     for (const f of foldData) {
                         if (f.id === null || !f.name.includes('.')) {
                             folderSet.add(f.name);
                             const subPath = `${prefix}/${f.name}`;
-                            const { data: fileData } = await sClient.storage.from(getBucketName()).list(subPath, { limit: 500 });
+                            const { data: fileData } = await supabase.storage.from(bucketName).list(subPath, { limit: 500 });
                             if (fileData) {
                                 fileData.forEach(file => {
                                     if (file.name.endsWith('.mp3') || file.name.endsWith('.wav')) {
@@ -192,9 +184,8 @@ app.post('/admin/create-playlist', async (req, res) => {
         const { accountId = 1, playlistName } = req.body;
         if (!playlistName) return res.status(400).json({ success: false, error: 'Playlist name required' });
         
-        const sClient = getSupabaseClient(accountId);
         const placeholderPath = `account_${accountId}/${playlistName.trim()}/.keep`;
-        await sClient.storage.from(getBucketName()).upload(placeholderPath, Buffer.from('placeholder'), { upsert: true });
+        await supabase.storage.from(bucketName).upload(placeholderPath, Buffer.from('placeholder'), { upsert: true });
 
         res.json({ success: true, message: 'Playlist created successfully!' });
     } catch (err) {
@@ -211,12 +202,11 @@ app.post('/admin/upload', upload.single('songFiles'), async (req, res) => {
             return res.status(400).json({ success: false, error: 'File or playlist missing' });
         }
 
-        const sClient = getSupabaseClient(accountId);
         const safeName = file.originalname.replace(/[^a-zA-Z0-9.\-_]/g, '_');
         const targetPath = `account_${accountId}/${playlist.trim()}/${safeName}`;
 
-        const { error } = await sClient.storage
-            .from(getBucketName())
+        const { error } = await supabase.storage
+            .from(bucketName)
             .upload(targetPath, file.buffer, {
                 contentType: file.mimetype || 'audio/mpeg',
                 upsert: true
@@ -233,10 +223,9 @@ app.post('/admin/upload', upload.single('songFiles'), async (req, res) => {
 app.post('/admin/delete', async (req, res) => {
     try {
         const { accountId = 1, playlist, fileName } = req.body;
-        const sClient = getSupabaseClient(accountId);
         const filePath = `account_${accountId}/${playlist}/${fileName}`;
 
-        const { error } = await sClient.storage.from(getBucketName()).remove([filePath]);
+        const { error } = await supabase.storage.from(bucketName).remove([filePath]);
         if (error) throw error;
 
         res.json({ success: true, message: 'Deleted successfully' });
