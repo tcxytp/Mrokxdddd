@@ -24,12 +24,11 @@ const upload = multer({
   limits: { fileSize: 100 * 1024 * 1024 }
 });
 
-// UNLIMITED DYNAMIC SUPABASE ACCOUNTS DISCOVERY ENGINE
+// UNLIMITED DYNAMIC SUPABASE ACCOUNTS DISCOVERY ENGINE (Optimized)
 function getSupabaseClients() {
   const clients = [];
   const registeredUrls = new Set();
 
-  // Primary Account (Account 1)
   if (process.env.SUPABASE_URL && process.env.SUPABASE_KEY) {
     clients.push({
       id: 1,
@@ -40,7 +39,6 @@ function getSupabaseClients() {
     registeredUrls.add(process.env.SUPABASE_URL);
   }
 
-  // Scan ALL process.env keys dynamically for unlimited accounts (SUPABASE_URL_2, 3, ... 50, 100+)
   const envKeys = Object.keys(process.env);
   const detectedIndices = new Set();
 
@@ -51,7 +49,6 @@ function getSupabaseClients() {
     }
   });
 
-  // Sort numerical order (2, 3, 4, 5...)
   const sortedIndices = Array.from(detectedIndices).sort((a, b) => a - b);
 
   sortedIndices.forEach(idx => {
@@ -104,7 +101,6 @@ app.get('/', (req, res) => {
   res.send('Vision Music Engine Live & Synced.');
 });
 
-// KEEP-ALIVE BOT HEALTHCHECK ENDPOINT (Wakes all attached Supabase accounts)
 app.get('/ping', async (req, res) => {
   try {
     const accounts = getSupabaseClients();
@@ -141,14 +137,16 @@ async function scanAccountRealFolders(acc) {
   }
 }
 
-// 1. UNIQUE MERGED PLAYLISTS API FOR FRONTEND
+// 1. UNIQUE MERGED PLAYLISTS API FOR FRONTEND (Fast parallel scan)
 app.get('/playlists', async (req, res) => {
   try {
     const accounts = getSupabaseClients();
     const seenMap = new Map();
 
-    for (const acc of accounts) {
-      const folders = await scanAccountRealFolders(acc);
+    const folderPromises = accounts.map(acc => scanAccountRealFolders(acc));
+    const allAccountFolders = await Promise.all(folderPromises);
+
+    allAccountFolders.forEach(folders => {
       folders.forEach(f => {
         if (f && f.trim() !== '') {
           const norm = f.trim().toLowerCase();
@@ -157,7 +155,7 @@ app.get('/playlists', async (req, res) => {
           }
         }
       });
-    }
+    });
 
     let list = Array.from(seenMap.values());
     if (list.length === 0) list.push("Hindi Song's");
@@ -167,7 +165,7 @@ app.get('/playlists', async (req, res) => {
   }
 });
 
-// 2. PUBLIC API: FETCH ALL TRACKS (Across unlimited accounts)
+// 2. PUBLIC API: FETCH ALL TRACKS (Optimized parallel fetching)
 app.get('/songs', async (req, res) => {
   try {
     const accounts = getSupabaseClients();
@@ -264,19 +262,18 @@ app.post('/admin/login', (req, res) => {
   return res.status(401).json({ success: false, error: 'Incorrect Access Key' });
 });
 
-// Accounts overview (Dynamic Accounts Monitor)
+// Accounts overview (Optimized parallel processing for speed)
 app.get('/admin/accounts-overview', verifyAnyAdmin, async (req, res) => {
   try {
     const accounts = getSupabaseClients();
-    const overview = [];
-
-    for (const acc of accounts) {
+    
+    const overviewPromises = accounts.map(async (acc) => {
       const realFolders = await scanAccountRealFolders(acc);
       let totalSizeBytes = 0;
       let totalSongsCount = 0;
       const folderBreakdown = {};
 
-      for (const folder of realFolders) {
+      const folderPromises = realFolders.map(async (folder) => {
         try {
           const { data: files } = await acc.client.storage.from(acc.bucket).list(folder, { limit: 1000 });
           const audioFiles = (files || []).filter(f =>
@@ -286,11 +283,18 @@ app.get('/admin/accounts-overview', verifyAnyAdmin, async (req, res) => {
           let folderBytes = 0;
           audioFiles.forEach(f => { folderBytes += f.metadata?.size || 0; });
 
-          totalSizeBytes += folderBytes;
-          totalSongsCount += audioFiles.length;
-          folderBreakdown[folder] = audioFiles.length;
-        } catch (e) {}
-      }
+          return { bytes: folderBytes, count: audioFiles.length, folder };
+        } catch (e) {
+          return { bytes: 0, count: 0, folder };
+        }
+      });
+
+      const folderResults = await Promise.all(folderPromises);
+      folderResults.forEach(resItem => {
+        totalSizeBytes += resItem.bytes;
+        totalSongsCount += resItem.count;
+        folderBreakdown[resItem.folder] = resItem.count;
+      });
 
       const ONE_GB_BYTES = 1024 * 1024 * 1024;
       const isFull = totalSizeBytes >= ONE_GB_BYTES;
@@ -298,7 +302,7 @@ app.get('/admin/accounts-overview', verifyAnyAdmin, async (req, res) => {
       const usedGB = (totalSizeBytes / (1024 * 1024 * 1024)).toFixed(3);
       const percentUsed = Math.min(100, ((totalSizeBytes / ONE_GB_BYTES) * 100)).toFixed(1);
 
-      overview.push({
+      return {
         id: acc.id,
         name: acc.name,
         bucket: acc.bucket,
@@ -310,16 +314,17 @@ app.get('/admin/accounts-overview', verifyAnyAdmin, async (req, res) => {
         isFull: isFull,
         folders: realFolders,
         folderBreakdown: folderBreakdown
-      });
-    }
+      };
+    });
 
+    const overview = await Promise.all(overviewPromises);
     res.json({ success: true, role: req.adminRole, accounts: overview });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// CREATE PLAYLIST (Super Admin Only)
+// CREATE PLAYLIST
 app.post('/admin/create-playlist', verifySuperAdminOnly, async (req, res) => {
   try {
     const { accountId, playlistName } = req.body;
